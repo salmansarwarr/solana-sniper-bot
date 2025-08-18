@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solana Trading Bot Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .status { padding: 10px; border-radius: 5px; margin: 10px 0; }
+        .status.active { background-color: #d4edda; }
+        .status.inactive { background-color: #f8d7da; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+        .log { background: #f8f9fa; padding: 15px; border-radius: 5px; height: 300px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Solana Trading Bot Dashboard</h1>
+        
+        <div id="status" class="status inactive">
+            Status: Loading...
+        </div>
+
+        <div>
+            <button onclick="startMonitoring()">Start Monitoring</button>
+            <button onclick="stopMonitoring()">Stop Monitoring</button>
+            <button onclick="scanNow()">Scan Now</button>
+            <button onclick="reloadPairs()">Reload Pairs</button>
+            <button onclick="updateStatus()">Refresh Status</button>
+        </div>
+
+        <div id="log" class="log"></div>
+    </div>
+
+    <script>
+        function log(message) {
+            const logDiv = document.getElementById('log');
+            logDiv.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${message}</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        async function apiCall(endpoint, method = 'GET', body = null) {
+            try {
+                const options = { method };
+                if (body) {
+                    options.headers = { 'Content-Type': 'application/json' };
+                    options.body = JSON.stringify(body);
+                }
+                const response = await fetch(`/api${endpoint}`, options);
+                return await response.json();
+            } catch (error) {
+                log(`Error: ${error.message}`);
+                return null;
+            }
+        }
+
+        async function updateStatus() {
+            const status = await apiCall('/monitoring/status');
+            if (status) {
+                const statusDiv = document.getElementById('status');
+                statusDiv.className = `status ${status.isMonitoring ? 'active' : 'inactive'}`;
+                statusDiv.innerHTML = `
+                    Status: ${status.isMonitoring ? 'MONITORING' : 'STOPPED'}<br>
+                    Detected Pairs: ${status.detectedPairsCount}<br>
+                    Wallet: ${status.walletAddress}
+                `;
+            }
+        }
+
+        async function startMonitoring() {
+            log('Starting monitoring...');
+            const result = await apiCall('/monitoring/start', 'POST', { intervalSeconds: 30 });
+            if (result && result.success) {
+                log('✅ Monitoring started');
+                updateStatus();
+            }
+        }
+
+        async function stopMonitoring() {
+            log('Stopping monitoring...');
+            const result = await apiCall('/monitoring/stop', 'POST');
+            if (result && result.success) {
+                log('⏹️ Monitoring stopped');
+                updateStatus();
+            }
+        }
+
+        async function scanNow() {
+            log('Scanning for new pairs...');
+            const result = await apiCall('/buy/scan', 'POST');
+            if (result && result.success) {
+                log(`🔍 Scan complete: ${result.newPairsFound} new pairs found`);
+            }
+        }
+
+        async function reloadPairs() {
+            log('Reloading existing pairs...');
+            const result = await apiCall('/monitoring/reload', 'POST');
+            if (result && result.success) {
+                log(`🔄 ${result.message}`);
+                updateStatus();
+            }
+        }
+
+        // Update status on page load
+        updateStatus();
+        
+        // Auto-refresh status every 10 seconds
+        setInterval(updateStatus, 10000);
+    </script>
+</body>
+</html>
