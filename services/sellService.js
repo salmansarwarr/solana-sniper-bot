@@ -1,18 +1,26 @@
-// services/sellService.js
 const https = require("https");
 const {
     Connection,
     Keypair,
     VersionedTransaction,
 } = require("@solana/web3.js");
-const { getTokensForFirstSell, markFirstSell } = require("../utils/db");
+const {
+    getTokensForFirstSell,
+    markFirstSell,
+    connectDB,
+} = require("../utils/db");
+const e = require("cors");
+const bs58 = require("bs58");
+require("dotenv").config();
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const RPC_URL = process.env.RPC_URL;
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 
 const connection = new Connection(RPC_URL, "confirmed");
-const user = Keypair.fromSecretKey(JSON.parse(process.env.PRIVATE_KEY));
+const user = Keypair.fromSecretKey(
+    bs58.default.decode(process.env.PRIVATE_KEY)
+);
 
 let state = {
     knownSignatures: new Set(),
@@ -104,6 +112,72 @@ const extractSellEventData = (tx, mintAddress) => {
         .filter((e) => e.solReceived != null);
 };
 
+async function getCurrentPrice(mintAddress, decimals) {
+    try {
+        // Build amount = 1 token (in base units)
+        const amount = 10 ** decimals;
+
+        // Fetch quote from Jupiter
+        const response = await fetch(
+            `https://quote-api.jup.ag/v6/quote?inputMint=${mintAddress}&outputMint=${SOL_MINT}&amount=${amount}&slippageBps=50`
+        );
+        const data = await response.json();
+
+        // Convert lamports (1e9 = 1 SOL)
+        const outAmountLamports = Number(data.outAmount);
+        const priceInSOL = outAmountLamports / 1e9;
+
+        return priceInSOL;
+    } catch (err) {
+        console.error("Price fetch error:", err.message);
+        return null;
+    }
+}
+
+async function monitorPriceForSecondSell(mintAddress) {
+    const db = await connectDB();
+    const token = await db
+        .collection("purchases")
+        .find({ tokenMint: mintAddress })
+        .toArray();
+    const tokenData = token[0];
+
+    // Start price monitoring (pseudo-code)
+    setInterval(async () => {
+        const currentPrice = await getCurrentPrice(
+            mintAddress,
+            tokenData.decimals || 6
+        );
+        if (currentPrice >= tokenData.targetPrice) {
+            try {
+                const { txid, solReceived } = await sellToken(
+                    mintAddress,
+                    tokenData.amount * 0.5, // Remaining 50%
+                    tokenData.decimals
+                );
+
+                await db
+                    .collection("purchases")
+                    .updateOne(
+                        { tokenMint: mintAddress },
+                        {
+                            $set: {
+                                secondSell: true,
+                                secondSellTimestamp: new Date(),
+                            },
+                        }
+                    );
+
+                console.log(
+                    `💰 Sold remaining 50% of ${mintAddress} for ${solReceived} SOL (tx: ${txid})`
+                );
+            } catch (err) {
+                console.error("Second sell failed:", err.message);
+            }
+        }
+    }, 10000); // Check every 10 seconds
+}
+
 const logSellEvent = (e) => {
     console.log("\n🔴 SELL TRANSACTION DETECTED!");
     console.log("═══════════════════════════════════════");
@@ -127,17 +201,21 @@ async function sellToken(inputMint, amountInTokens, tokenDecimals) {
     const quote = await quoteResponse.json();
     if (!quote.outAmount) throw new Error("No route found for swap");
 
-    const { swapTransaction } = await (
-        await fetch("https://quote-api.jup.ag/v6/swap", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                quoteResponse: quote,
-                userPublicKey: user.publicKey.toString(),
-                wrapAndUnwrapSol: true,
-            }),
-        })
-    ).json();
+    const swapResponse = await fetch("https://quote-api.jup.ag/v6/swap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            quoteResponse: quote,
+            userPublicKey: user.publicKey.toString(),
+            wrapAndUnwrapSol: true,
+        }),
+    });
+
+    if (!swapResponse.ok) {
+        throw new Error(`Swap API error: ${swapResponse.status}`);
+    }
+
+    const { swapTransaction } = await swapResponse.json();
 
     const swapTxBuf = Buffer.from(swapTransaction, "base64");
     const tx = VersionedTransaction.deserialize(swapTxBuf);
@@ -157,10 +235,10 @@ async function processOnce() {
     // fetch transactions per token
     const tokenResults = await Promise.all(
         tokens.map(async (t) => ({
-            mintAddress: t.mintAddress,
+            mintAddress: t.tokenMint,
             decimals: t.decimals,
             amount: t.amount,
-            transactions: await fetchTransactions(t.mintAddress),
+            transactions: await fetchTransactions(t.tokenMint),
         }))
     );
 
@@ -172,12 +250,12 @@ async function processOnce() {
         amount,
         transactions,
     } of tokenResults) {
-        const tokenData = tokens.find(t => t.tokenMint === mintAddress);
+        const tokenData = tokens.find((t) => t.tokenMint === mintAddress);
         if (tokenData && tokenData.firstSell) {
             console.log(`⏭️ Skipping ${mintAddress} - already sold`);
             continue;
         }
-        
+
         const unseen = transactions.filter(
             (tx) => !state.knownSignatures.has(tx.signature)
         );
@@ -202,7 +280,9 @@ async function processOnce() {
                     console.log(
                         `💰 Sold 50% of ${mintAddress} for ${solReceived} SOL (tx: ${txid})`
                     );
-                    await markFirstSell(mintAddress);
+                    const tp = ev.tokenAmount / ev.solReceived;
+                    await markFirstSell(mintAddress, tp);
+                    await monitorPriceForSecondSell(mintAddress);
                 } catch (sellErr) {
                     console.error(
                         "❌ Sell transaction failed:",
