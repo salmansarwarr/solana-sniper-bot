@@ -6,6 +6,9 @@ const {
     VersionedTransaction,
 } = require("@solana/web3.js");
 const { savePurchase } = require("../utils/db");
+const { addTokenToMempool } = require("./mempoolMonitor");
+const bs58 = require("bs58");
+require('dotenv').config();
 
 const API_BASE = "https://api-v3.raydium.io";
 const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -16,7 +19,7 @@ let detectedPairs = new Set();
 let monitoringInterval = null;
 let isMonitoring = false;
 
-const user = Keypair.fromSecretKey(JSON.parse(process.env.PRIVATE_KEY));
+const user = Keypair.fromSecretKey(bs58.default.decode(process.env.PRIVATE_KEY));
 
 // Buy token using Jupiter
 async function buyToken(outputMint, amountInSol = 0.0001) {
@@ -33,8 +36,7 @@ async function buyToken(outputMint, amountInSol = 0.0001) {
             throw new Error("No route found for swap");
         }
 
-        const { swapTransaction } = await (
-            await fetch("https://quote-api.jup.ag/v6/swap", {
+        const swapResponse = await fetch("https://quote-api.jup.ag/v6/swap", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -42,8 +44,13 @@ async function buyToken(outputMint, amountInSol = 0.0001) {
                     userPublicKey: user.publicKey.toString(),
                     wrapAndUnwrapSol: true,
                 }),
-            })
-        ).json();
+            });
+
+        if (!swapResponse.ok) {
+            throw new Error(`Swap API error: ${swapResponse.status}`);
+        }
+
+        const { swapTransaction } = await swapResponse.json();
 
         const swapTxBuf = Buffer.from(swapTransaction, "base64");
         const tx = VersionedTransaction.deserialize(swapTxBuf);
@@ -56,7 +63,13 @@ async function buyToken(outputMint, amountInSol = 0.0001) {
 
         const amountBought =
             quote.outAmount / 10 ** (quote.outputMintDecimals || 6);
+        
+        // Save purchase to database
         await savePurchase(outputMint, amountBought, quote.outputMintDecimals || 6);
+        
+        // ✅ ADD TOKEN TO MEMPOOL MONITORING
+        console.log(`🎯 Adding ${outputMint} to mempool monitoring...`);
+        await addTokenToMempool(outputMint);
 
         return {
             txid,
@@ -188,16 +201,23 @@ async function detectNewSOLPairs() {
             if (snsDomains.length > 0) {
                 shouldBuy = true;
                 pairInfo.snsHolders = snsDomains;
+                console.log(`✅ Found SNS holder for ${pairInfo.nonSolMint}: ${snsDomains.join(', ')}`);
                 break;
             }
         }
 
         if (shouldBuy) {
             try {
-                const buyResult = await buyToken(pairInfo.nonSolMint, 0.00001);
+                console.log(`🎯 SNS criteria met! Buying ${pairInfo.nonSolMint}...`);
+                const buyResult = await buyToken(pairInfo.nonSolMint, process.env.DEFAULT_BUY_AMOUNT);
                 pairInfo.purchased = true;
                 pairInfo.purchaseDetails = buyResult;
+                
+                console.log(`✅ Successfully bought ${pairInfo.nonSolSymbol}!`);
+                console.log(`🔗 Transaction: https://solscan.io/tx/${buyResult.txid}`);
+                
             } catch (error) {
+                console.error(`❌ Purchase failed for ${pairInfo.nonSolMint}:`, error.message);
                 pairInfo.purchaseError = error.message;
             }
         }
@@ -226,6 +246,12 @@ function startBackgroundMonitoring(intervalSeconds = 30) {
             const newPairs = await detectNewSOLPairs();
             if (newPairs.length > 0) {
                 console.log(`🎉 Found ${newPairs.length} new SOL pairs`);
+                const purchasedPairs = newPairs.filter(p => p.purchased);
+                if (purchasedPairs.length > 0) {
+                    console.log(`💰 Purchased ${purchasedPairs.length} tokens with SNS holders`);
+                }
+            } else {
+                console.log("🔍 No new SOL pairs found this cycle");
             }
         } catch (error) {
             console.error("Error in monitoring cycle:", error.message);
@@ -233,7 +259,7 @@ function startBackgroundMonitoring(intervalSeconds = 30) {
     }, intervalSeconds * 1000);
 
     console.log(
-        `🔄 Background monitoring started (${intervalSeconds}s interval)`
+        `🔥 Background monitoring started (${intervalSeconds}s interval)`
     );
 }
 
