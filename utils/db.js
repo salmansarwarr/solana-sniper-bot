@@ -1,5 +1,6 @@
 // utils/db.js
 const { MongoClient } = require("mongodb");
+require('dotenv').config();
 
 const uri = process.env.MONGO_URI;
 const client = new MongoClient(uri);
@@ -24,7 +25,9 @@ async function savePurchase(tokenMint, amount, decimals) {
         decimals,
         timestamp: new Date(),
         firstSell: false,
-        secondSell: true,
+        secondSell: false,
+        purchasePrice: null, 
+        targetPrice: null  
     });
     console.log(
         `📦 Saved purchase ${tokenMint}, amount: ${amount}, decimals: ${decimals}`
@@ -51,13 +54,13 @@ async function getTokensForFirstSell(limit = 50) {
         .toArray();
 }
 
-async function markFirstSell(tokenMint) {
+async function markFirstSell(tokenMint, tp) {
     const database = await connectDB();
     const result = await database
         .collection("purchases")
         .updateOne(
             { tokenMint: tokenMint },
-            { $set: { firstSell: true, firstSellTimestamp: new Date() } }
+            { $set: { firstSell: true, firstSellTimestamp: new Date(), targetPrice: tp } }
         );
     
     if (result.matchedCount === 0) {
